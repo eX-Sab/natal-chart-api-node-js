@@ -103,6 +103,41 @@ function getAspects(positions) {
   return aspects;
 }
 
+function getTransitAspects(natalPositions, transitPositions) {
+  const aspects = [];
+  const aspectTypes = [
+    { type: 'Conjunction', angle: 0, orb: 8 },
+    { type: 'Opposition', angle: 180, orb: 8 },
+    { type: 'Trine', angle: 120, orb: 8 },
+    { type: 'Square', angle: 90, orb: 8 },
+    { type: 'Sextile', angle: 60, orb: 6 }
+  ];
+  const natalKeys = Object.keys(natalPositions);
+  const transitKeys = Object.keys(transitPositions);
+  for (let i = 0; i < natalKeys.length; i++) {
+    for (let j = 0; j < transitKeys.length; j++) {
+      const a = natalPositions[natalKeys[i]].absDegree;
+      const b = transitPositions[transitKeys[j]].absDegree;
+      if (a == null || b == null) continue;
+      let diff = Math.abs(a - b);
+      if (diff > 180) diff = 360 - diff;
+      for (const asp of aspectTypes) {
+        if (Math.abs(diff - asp.angle) <= asp.orb) {
+          aspects.push({
+            type: asp.type,
+            between: [
+              `Natal ${natalKeys[i]}`,
+              `Transit ${transitKeys[j]}`
+            ],
+            orb: +(Math.abs(diff - asp.angle)).toFixed(2)
+          });
+        }
+      }
+    }
+  }
+  return aspects;
+}
+
 function toJulianDay({ year, month, day, hour }) {
   return swisseph.swe_julday(year, month, day, hour, swisseph.SE_GREG_CAL);
 }
@@ -222,10 +257,12 @@ app.post('/natal-chart', async (req, res) => {
     const elemental_distribution = getElementalDistribution(positions);
     const modal_distribution = getModalDistribution(positions);
     let transits = null;
+    let transit_aspects = null;
     if (transit_date && transit_time) {
       const transit = parseDateTime(transit_date, transit_time, transit_timezone);
       const jdTransit = toJulianDay(transit);
       transits = await getTransits(jd, jdTransit);
+      transit_aspects = getTransitAspects(positions, transits);
     }
     for (const k in positions) delete positions[k].absDegree;
     const resultObj = {
@@ -238,6 +275,9 @@ app.post('/natal-chart', async (req, res) => {
     if (transits) {
       for (const k in transits) delete transits[k].absDegree;
       resultObj.transits = transits;
+    }
+    if (transit_aspects) {
+      resultObj.transit_aspects = transit_aspects;
     }
     res.json(resultObj);
   } catch (e) {
