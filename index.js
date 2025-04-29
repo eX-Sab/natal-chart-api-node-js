@@ -165,15 +165,24 @@ function parseDateTime(date, time, timezone) {
   return { year, month, day, hour };
 }
 
-async function getPlanetPosition(jd, planet) {
-  return new Promise((resolve) => {
-    swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH, (res) => {
-      resolve(res);
+// Remove the global call to swe_set_topo
+// Ensure swe_set_topo is called dynamically within the getPlanetPosition function
+async function getPlanetPosition(jd, planet, lat, lon) {
+  return new Promise((resolve, reject) => {
+    swisseph.swe_set_topo(lat, lon, 0); // Set observer's location dynamically
+    swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH | swisseph.SEFLG_TOPOCTR, (res) => {
+      if (res.error) {
+        console.error(`Error calculating position for planet ${planet}:`, res.error);
+        resolve({ longitude: null }); // Return null longitude on error
+      } else {
+        resolve(res);
+      }
     });
   });
 }
 
-async function getAllPositions(jd, housesData) {
+// Update getAllPositions to pass lat and lon to getPlanetPosition
+async function getAllPositions(jd, housesData, lat, lon) {
   const positions = {};
   let cusps = null;
   if (housesData) {
@@ -184,7 +193,7 @@ async function getAllPositions(jd, housesData) {
     }
   }
   for (const planet of PLANETS) {
-    const res = await getPlanetPosition(jd, planet.swe);
+    const res = await getPlanetPosition(jd, planet.swe, lat, lon);
     const absDegree = res.longitude;
     const sign = getSign(absDegree);
     const degree = getDegreeInSign(absDegree);
@@ -211,9 +220,9 @@ async function getAllPositions(jd, housesData) {
   return positions;
 }
 
-async function getTransits(jdNatal, jdTransit) {
+async function getTransits(jdNatal, jdTransit, lat, lon) {
   // Calculate transiting planets at jdTransit
-  const transitPositions = await getAllPositions(jdTransit);
+  const transitPositions = await getAllPositions(jdTransit, null);
   return transitPositions;
 }
 
@@ -252,7 +261,7 @@ app.post('/natal-chart', async (req, res) => {
     if (lat != null && lon != null) {
       houses = await getHousesWithError(jd, lat, lon, hsys);
     }
-    const positions = await getAllPositions(jd, houses);
+    const positions = await getAllPositions(jd, houses, lat, lon);
     const aspects = getAspects(positions);
     const elemental_distribution = getElementalDistribution(positions);
     const modal_distribution = getModalDistribution(positions);
@@ -261,7 +270,7 @@ app.post('/natal-chart', async (req, res) => {
     if (transit_date && transit_time) {
       const transit = parseDateTime(transit_date, transit_time, transit_timezone);
       const jdTransit = toJulianDay(transit);
-      transits = await getTransits(jd, jdTransit);
+      transits = await getAllPositions(jdTransit, null, lat, lon);
       transit_aspects = getTransitAspects(positions, transits);
     }
     for (const k in positions) delete positions[k].absDegree;
@@ -270,7 +279,17 @@ app.post('/natal-chart', async (req, res) => {
       aspects,
       elemental_distribution,
       modal_distribution,
-      houses
+      houses: houses ? {
+        ...houses,
+        ascendant: {
+          sign: getSign(houses.ascendant),
+          degree: getDegreeInSign(houses.ascendant)
+        },
+        mc: {
+          sign: getSign(houses.mc),
+          degree: getDegreeInSign(houses.mc)
+        }
+      } : null
     };
     if (transits) {
       for (const k in transits) delete transits[k].absDegree;
