@@ -103,41 +103,6 @@ function getAspects(positions) {
   return aspects;
 }
 
-function getTransitAspects(natalPositions, transitPositions) {
-  const aspects = [];
-  const aspectTypes = [
-    { type: 'Conjunction', angle: 0, orb: 8 },
-    { type: 'Opposition', angle: 180, orb: 8 },
-    { type: 'Trine', angle: 120, orb: 8 },
-    { type: 'Square', angle: 90, orb: 8 },
-    { type: 'Sextile', angle: 60, orb: 6 }
-  ];
-  const natalKeys = Object.keys(natalPositions);
-  const transitKeys = Object.keys(transitPositions);
-  for (let i = 0; i < natalKeys.length; i++) {
-    for (let j = 0; j < transitKeys.length; j++) {
-      const a = natalPositions[natalKeys[i]].absDegree;
-      const b = transitPositions[transitKeys[j]].absDegree;
-      if (a == null || b == null) continue;
-      let diff = Math.abs(a - b);
-      if (diff > 180) diff = 360 - diff;
-      for (const asp of aspectTypes) {
-        if (Math.abs(diff - asp.angle) <= asp.orb) {
-          aspects.push({
-            type: asp.type,
-            between: [
-              `Natal ${natalKeys[i]}`,
-              `Transit ${transitKeys[j]}`
-            ],
-            orb: +(Math.abs(diff - asp.angle)).toFixed(2)
-          });
-        }
-      }
-    }
-  }
-  return aspects;
-}
-
 function toJulianDay({ year, month, day, hour }) {
   return swisseph.swe_julday(year, month, day, hour, swisseph.SE_GREG_CAL);
 }
@@ -165,24 +130,15 @@ function parseDateTime(date, time, timezone) {
   return { year, month, day, hour };
 }
 
-// Remove the global call to swe_set_topo
-// Ensure swe_set_topo is called dynamically within the getPlanetPosition function
-async function getPlanetPosition(jd, planet, lat, lon) {
-  return new Promise((resolve, reject) => {
-    swisseph.swe_set_topo(lat, lon, 0); // Set observer's location dynamically
-    swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH | swisseph.SEFLG_TOPOCTR, (res) => {
-      if (res.error) {
-        console.error(`Error calculating position for planet ${planet}:`, res.error);
-        resolve({ longitude: null }); // Return null longitude on error
-      } else {
-        resolve(res);
-      }
+async function getPlanetPosition(jd, planet) {
+  return new Promise((resolve) => {
+    swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH, (res) => {
+      resolve(res);
     });
   });
 }
 
-// Update getAllPositions to pass lat and lon to getPlanetPosition
-async function getAllPositions(jd, housesData, lat, lon) {
+async function getAllPositions(jd, housesData) {
   const positions = {};
   let cusps = null;
   if (housesData) {
@@ -193,7 +149,7 @@ async function getAllPositions(jd, housesData, lat, lon) {
     }
   }
   for (const planet of PLANETS) {
-    const res = await getPlanetPosition(jd, planet.swe, lat, lon);
+    const res = await getPlanetPosition(jd, planet.swe);
     const absDegree = res.longitude;
     const sign = getSign(absDegree);
     const degree = getDegreeInSign(absDegree);
@@ -220,85 +176,213 @@ async function getAllPositions(jd, housesData, lat, lon) {
   return positions;
 }
 
-async function getTransits(jdNatal, jdTransit, lat, lon) {
+async function getTransits(jdNatal, jdTransit) {
   // Calculate transiting planets at jdTransit
-  const transitPositions = await getAllPositions(jdTransit, null);
+  const transitPositions = await getAllPositions(jdTransit);
   return transitPositions;
 }
 
 function getHousesWithError(jd, lat, lon, hsys = 'P') {
   return new Promise((resolve) => {
     swisseph.swe_houses(jd, lat, lon, hsys, (err, result) => {
-      if (result && (result.cusps || result.house)) {
-        resolve({
-          ascendant: result.ascendant || (result.ascmc ? result.ascmc[0] : undefined),
-          midheaven: result.mc || (result.ascmc ? result.ascmc[1] : undefined),
-          armc: result.armc || (result.ascmc ? result.ascmc[2] : undefined),
-          vertex: result.vertex || (result.ascmc ? result.ascmc[3] : undefined),
-          equatorialAscendant: result.equatorialAscendant || (result.ascmc ? result.ascmc[4] : undefined),
-          kochCoAscendant: result.kochCoAscendant || (result.ascmc ? result.ascmc[5] : undefined),
-          munkaseyCoAscendant: result.munkaseyCoAscendant || (result.ascmc ? result.ascmc[6] : undefined),
-          munkaseyPolarAscendant: result.munkaseyPolarAscendant || (result.ascmc ? result.ascmc[7] : undefined),
-          cusps: result.cusps || result.house,
-          warning: err ? err : undefined
-        });
-      } else if (err) {
-        resolve({ error: 'Swiss Ephemeris internal error', detail: err });
-      } else {
-        resolve(null);
-      }
+      // Use result if present, otherwise use err (which may contain the data)
+      const data = result || err;
+      const ascmc = data && data.ascmc ? data.ascmc : [];
+      resolve({
+        ascendant: data?.ascendant || ascmc[0],
+        midheaven: data?.mc || ascmc[1],
+        armc: data?.armc,
+        vertex: data?.vertex,
+        equatorialAscendant: data?.equatorialAscendant,
+        kochCoAscendant: data?.kochCoAscendant,
+        munkaseyCoAscendant: data?.munkaseyCoAscendant,
+        munkaseyPolarAscendant: data?.munkaseyPolarAscendant,
+        cusps: data?.cusps || data?.house,
+        warning: err && result ? err : undefined
+      });
     });
   });
 }
 
 app.post('/natal-chart', async (req, res) => {
   try {
-    const { date, time, lat, lon, transit_date, transit_time, hsys, timezone, transit_timezone } = req.body;
-    const birth = parseDateTime(date, time, timezone);
-    const jd = toJulianDay(birth);
-    // Always include houses, asc, mc if lat/lon provided, even with error
+    // Extract meta fields from request
+    const { name, birth, chart_settings, transit_chart } = req.body;
+    // Fallback for legacy/simple requests
+    let birthData = birth || {};
+    if (!birthData.date && req.body.date) {
+      birthData = {
+        date: req.body.date,
+        time: req.body.time,
+        timezone: req.body.timezone,
+        location: {
+          lat: req.body.lat,
+          lon: req.body.lon,
+          city: req.body.city || undefined
+        }
+      };
+    }
+    const hsys = (chart_settings && chart_settings.house_system) || req.body.hsys || 'P';
+    // Parse birth datetime
+    const birthDT = parseDateTime(birthData.date, birthData.time, birthData.timezone);
+    const jd = toJulianDay(birthDT);
+    const lat = birthData.location?.lat ?? req.body.lat;
+    const lon = birthData.location?.lon ?? req.body.lon;
+    // Houses and angles
     let houses = null;
     if (lat != null && lon != null) {
+      console.log("lat lon provided and not null");
       houses = await getHousesWithError(jd, lat, lon, hsys);
     }
-    const positions = await getAllPositions(jd, houses, lat, lon);
-    const aspects = getAspects(positions);
-    const elemental_distribution = getElementalDistribution(positions);
-    const modal_distribution = getModalDistribution(positions);
-    let transits = null;
-    let transit_aspects = null;
-    if (transit_date && transit_time) {
-      const transit = parseDateTime(transit_date, transit_time, transit_timezone);
-      const jdTransit = toJulianDay(transit);
-      transits = await getAllPositions(jdTransit, null, lat, lon);
-      transit_aspects = getTransitAspects(positions, transits);
+    
+    // Helper to get retrograde from Swiss Ephemeris speed
+    async function getPlanetPositionWithRetro(jd, planet) {
+      return new Promise((resolve) => {
+        swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH, (res) => {
+          resolve({ ...res, retrograde: res.speed < 0 });
+        });
+      });
     }
-    for (const k in positions) delete positions[k].absDegree;
-    const resultObj = {
-      ...positions,
-      aspects,
-      elemental_distribution,
-      modal_distribution,
-      houses: houses ? {
-        ...houses,
-        ascendant: {
-          sign: getSign(houses.ascendant),
-          degree: getDegreeInSign(houses.ascendant)
-        },
-        mc: {
-          sign: getSign(houses.mc),
-          degree: getDegreeInSign(houses.mc)
+    // Natal chart planets
+    const natalPositions = {};
+    for (const planet of PLANETS) {
+      const res = await getPlanetPositionWithRetro(jd, planet.swe);
+      const absDegree = res.longitude;
+      const sign = getSign(absDegree);
+      const degree = +(absDegree % 30).toFixed(2);
+      let house = null;
+      if (houses && houses.cusps) {
+        for (let h = 1; h <= 12; h++) {
+          const start = houses.cusps[h - 1];
+          const end = houses.cusps[h % 12];
+          if (start < end) {
+            if (absDegree >= start && absDegree < end) { house = h; break; }
+          } else {
+            if (absDegree >= start || absDegree < end) { house = h; break; }
+          }
         }
-      } : null
+      }
+      natalPositions[planet.name.replace('North Node', 'NorthNode')] = {
+        sign,
+        degree,
+        house,
+        retrograde: res.retrograde
+      };
+    }
+    // Ascendant & MC
+    const ascDegree = houses?.ascendant;
+    const mcDegree = houses?.midheaven;
+    const ascendant = ascDegree != null ? { sign: getSign(ascDegree), degree: +(ascDegree % 30).toFixed(2) } : null;
+    const midheaven = mcDegree != null ? { sign: getSign(mcDegree), degree: +(mcDegree % 30).toFixed(2) } : null;
+    const housesArr = houses?.cusps ? houses.cusps.map(x => +x.toFixed(2)) : null;
+    // Aspects (natal)
+    const natalAbs = {};
+    for (const planet in natalPositions) {
+      // Recompute absDegree for aspect calculation
+      const idx = PLANETS.findIndex(p => p.name.replace('North Node', 'NorthNode') === planet);
+      if (idx >= 0) {
+        const res = await getPlanetPositionWithRetro(jd, PLANETS[idx].swe);
+        natalAbs[planet] = { absDegree: res.longitude };
+      }
+    }
+    const natalAspects = getAspects(natalAbs);
+    // Transit chart
+    let transitResult = null;
+    if (transit_chart && transit_chart.date && transit_chart.time) {
+      const transitDT = parseDateTime(transit_chart.date, transit_chart.time, transit_chart.timezone);
+      const jdTransit = toJulianDay(transitDT);
+      // Transit planets
+      const transitPositions = {};
+      for (const planet of PLANETS) {
+        const res = await getPlanetPositionWithRetro(jdTransit, planet.swe);
+        const absDegree = res.longitude;
+        const sign = getSign(absDegree);
+        const degree = +(absDegree % 30).toFixed(2);
+        let house = null;
+        if (houses && houses.cusps) {
+          for (let h = 1; h <= 12; h++) {
+            const start = houses.cusps[h - 1];
+            const end = houses.cusps[h % 12];
+            if (start < end) {
+              if (absDegree >= start && absDegree < end) { house = h; break; }
+            } else {
+              if (absDegree >= start || absDegree < end) { house = h; break; }
+            }
+          }
+        }
+        transitPositions[planet.name.replace('North Node', 'NorthNode')] = {
+          sign,
+          degree,
+          house
+        };
+      }
+      // Aspects to natal
+      const transitAbs = {};
+      for (const planet in transitPositions) {
+        const idx = PLANETS.findIndex(p => p.name.replace('North Node', 'NorthNode') === planet);
+        if (idx >= 0) {
+          const res = await getPlanetPositionWithRetro(jdTransit, PLANETS[idx].swe);
+          transitAbs[planet] = { absDegree: res.longitude };
+        }
+      }
+      // Aspects between transit and natal
+      const aspectTypes = [
+        { type: 'Conjunction', angle: 0, orb: 8 },
+        { type: 'Opposition', angle: 180, orb: 8 },
+        { type: 'Trine', angle: 120, orb: 8 },
+        { type: 'Square', angle: 90, orb: 8 },
+        { type: 'Sextile', angle: 60, orb: 6 }
+      ];
+      const aspects_to_natal = [];
+      for (const nat in natalAbs) {
+        for (const trn in transitAbs) {
+          const a = natalAbs[nat].absDegree;
+          const b = transitAbs[trn].absDegree;
+          if (a == null || b == null) continue;
+          let diff = Math.abs(a - b);
+          if (diff > 180) diff = 360 - diff;
+          for (const asp of aspectTypes) {
+            if (Math.abs(diff - asp.angle) <= asp.orb) {
+              aspects_to_natal.push({
+                type: asp.type,
+                between: [`Natal ${nat}`, `Transit ${trn}`],
+                orb: +(Math.abs(diff - asp.angle)).toFixed(2)
+              });
+            }
+          }
+        }
+      }
+      transitResult = {
+        date: transit_chart.date,
+        planets: transitPositions,
+        aspects_to_natal
+      };
+    }
+    // Compose response
+    const response = {
+      meta: {
+        name: name || req.body.name || null,
+        birth: {
+          date: birthData.date,
+          time: birthData.time,
+          timezone: birthData.timezone,
+          location: birthData.location
+        },
+        chart_settings: chart_settings || {
+          zodiac: 'tropical',
+          house_system: hsys === 'P' ? 'Placidus' : hsys
+        }
+      },
+      natal_chart: {
+        ascendant,
+        midheaven,
+        houses: housesArr,
+        planets: natalPositions,
+        aspects: natalAspects
+      },
+      transit_chart: transitResult
     };
-    if (transits) {
-      for (const k in transits) delete transits[k].absDegree;
-      resultObj.transits = transits;
-    }
-    if (transit_aspects) {
-      resultObj.transit_aspects = transit_aspects;
-    }
-    res.json(resultObj);
+    res.json(response);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
