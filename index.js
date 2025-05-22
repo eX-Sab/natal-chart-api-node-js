@@ -1,4 +1,4 @@
-// index.js
+// index.js for Natal Chart API
 const express = require('express');
 const cors = require('cors');
 const swisseph = require('swisseph');
